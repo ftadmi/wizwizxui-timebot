@@ -77,8 +77,1154 @@ if(strstr($text, "/start ")){
         }
     }
     
-    $text = "/start";
+        $text = "/start";
 }
+if ($data == "startMenu" && $from_id == $admin) {
+    $connection->query("UPDATE users SET step='none', temp='' WHERE userid='$from_id'");
+    delPrevMessages();
+     delMessage();
+       sendMessage("🔙 به منوی اصلی بازگشتید.\n\n/start", getMainKeys());
+    exit;
+}
+$stmtUser = $connection->prepare("SELECT step, temp FROM users WHERE userid=? LIMIT 1");
+$stmtUser->bind_param("s", $from_id);
+$stmtUser->execute();
+$resultUser = $stmtUser->get_result();
+$user = $resultUser->fetch_assoc();
+$stmtUser->close();
+
+function logEvent($msg){
+    file_put_contents(__DIR__.'/bot_log.txt', date('Y-m-d H:i:s').' '.$msg.PHP_EOL, FILE_APPEND);
+}
+
+if ($data == "admin_add_gpt" && $from_id == $admin) {
+    $connection->query("UPDATE users SET step='add_gpt_email' WHERE userid='$from_id'");
+    $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+    sendMessage("📩 لطفاً ایمیل اکانت GPT را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+if ($user['step'] == "add_gpt_email" && $from_id == $admin && !empty($text)) {
+    $email = trim($text);
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+        sendMessage("⚠️ ایمیل نامعتبر است. لطفاً دوباره ارسال کنید.", json_encode($keyboard));
+        exit;
+    }
+    $connection->query("UPDATE users SET temp='$email', step='add_gpt_password' WHERE userid='$from_id'");
+    $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+    sendMessage("🔑 لطفاً پسورد اکانت GPT را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+if ($user['step'] == "add_gpt_password" && $from_id == $admin && !empty($text)) {
+    $password = trim($text);
+    if (strlen($password) < 4 || strlen($password) > 200) {
+        $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+        sendMessage("⚠️ پسورد نامعتبر است. حداقل 4 کاراکتر.", json_encode($keyboard));
+        exit;
+    }
+ 
+    $stmt = $connection->prepare("UPDATE users SET temp=CONCAT(temp,'|||',?), step='add_gpt_price' WHERE userid=?");
+    $stmt->bind_param("si", $password, $from_id);
+    $stmt->execute();
+    $stmt->close();
+    $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+    sendMessage("💰 لطفاً قیمت (تومان) را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+if ($user['step'] == "add_gpt_price" && $from_id == $admin && !empty($text)) {
+    $price = (int) trim($text);
+    if ($price <= 0) {
+        $keyboard = ['inline_keyboard' => [[ ['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu'] ]]];
+        sendMessage("⚠️ قیمت نامعتبر است. دوباره ارسال کنید.", json_encode($keyboard));
+        exit;
+    }
+
+    $parts = explode("|||", $user['temp']);
+    if (count($parts) < 2) {
+        sendMessage("⚠️ خطا: اطلاعات ناقص است. لطفاً دوباره از /admin شروع کنید.");
+        exit;
+    }
+    list($email, $password) = $parts;
+
+    $stmt = $connection->prepare("
+        INSERT INTO gpt_accounts (email, password, price, is_sold)
+        VALUES (?, ?, ?, 0)
+    ");
+    $stmt->bind_param("ssi", $email, $password, $price);
+    $ok = $stmt->execute();
+    $stmt->close();
+
+    if (!$ok) {
+        sendMessage("⚠️ خطا در ثبت در دیتابیس. دوباره تلاش کنید.");
+        exit;
+    }
+
+    $connection->query("UPDATE users SET step='none', temp='' WHERE userid='$from_id'");
+
+    sendMessage(
+        "✅ اکانت GPT با موفقیت ثبت شد!\n\n" .
+        "📧 ایمیل: $email\n" .
+        "🔑 پسورد: $password\n" .
+        "💰 قیمت: " . number_format($price) . " تومان"
+    );
+    exit;
+}
+
+
+if ($data == "admin_manage_gpt" && $from_id == $admin) {
+    delMessage();
+    $result = $connection->query("SELECT * FROM gpt_accounts ORDER BY id DESC");
+    $keyboard = ['inline_keyboard' => []];
+
+    if (!$result || $result->num_rows == 0) {
+        sendMessage("⚠️ هیچ اکانت GPT ثبت نشده است.");
+        exit;
+    }
+
+    while ($row = $result->fetch_assoc()) {
+        $id = $row['id'];
+        $email = $row['email'];
+        $price = number_format($row['price']);
+        $display = "$email | $price تومان";
+
+        $keyboard['inline_keyboard'][] = [
+            ['text' => "❌ حذف", 'callback_data' => "deleteGPT|$id"],
+            ['text' => $display, 'callback_data' => "noop"],
+            ['text' => "✏️ ویرایش", 'callback_data' => "admin_edit_gpt_$id"]
+        ];
+    }
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("📋 لیست اکانت‌های GPT:", json_encode($keyboard));
+    exit;
+}
+
+
+if (strpos($data, "admin_edit_gpt_") === 0 && $from_id == $admin) {
+    delMessage();
+    $id = (int) str_replace("admin_edit_gpt_", "", $data);
+
+    $stmt = $connection->prepare("SELECT * FROM gpt_accounts WHERE id=? LIMIT 1");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $gpt = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$gpt) {
+        sendMessage("⚠️ اکانت پیدا نشد.");
+        exit;
+    }
+
+    $keyboard = [
+        "inline_keyboard" => [
+            [
+                ["text" => "📧 {$gpt['email']}", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_gpt_field|email|$id"]
+            ],
+            [
+                ["text" => "🔑 {$gpt['password']}", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_gpt_field|password|$id"]
+            ],
+            [
+                ["text" => "💰 " . number_format($gpt['price']) . " تومان", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_gpt_field|price|$id"]
+            ],
+            [
+                ["text" => "🔙 بازگشت", "callback_data" => "admin_manage_gpt"]
+            ]
+        ]
+    ];
+
+    sendMessage("✏️ کدام فیلد را ویرایش می‌کنید؟", json_encode($keyboard));
+    exit;
+}
+
+
+if (strpos($data, "edit_gpt_field|") === 0 && $from_id == $admin) {
+    delMessage();
+    list(, $field, $id) = explode("|", $data);
+
+    $connection->query("UPDATE users SET step='edit_gpt_$field', temp='$id' WHERE userid='$from_id'");
+
+    sendMessage("✏️ مقدار جدید برای «$field» را ارسال کنید:");
+    exit;
+}
+
+
+if (strpos($user['step'], "edit_gpt_") === 0 && $from_id == $admin) {
+    delMessage();
+    $field = str_replace("edit_gpt_", "", $user['step']);
+    $id = (int)$user['temp'];
+    $newValue = trim($text);
+
+    $allowed = ["email", "password", "price"];
+    if (!in_array($field, $allowed)) {
+        sendMessage("⚠️ فیلد نامعتبر.");
+        exit;
+    }
+
+   
+    if ($field == "price") {
+        $newValueInt = (int) $newValue;
+        if ($newValueInt <= 0) {
+            sendMessage("⚠️ مقدار قیمت نامعتبر است.");
+            exit;
+        }
+        $stmt = $connection->prepare("UPDATE gpt_accounts SET price=? WHERE id=?");
+        $stmt->bind_param("ii", $newValueInt, $id);
+    } else {
+        $stmt = $connection->prepare("UPDATE gpt_accounts SET $field=? WHERE id=?");
+        $stmt->bind_param("si", $newValue, $id);
+    }
+
+    $stmt->execute();
+    $stmt->close();
+
+    $connection->query("UPDATE users SET step='none', temp='' WHERE userid='$from_id'");
+
+    sendMessage("✅ با موفقیت ویرایش شد!");
+    sendMessage("🔄 بازگشت...", json_encode([
+        "inline_keyboard" => [
+            [['text' => "بازگشت", 'callback_data' => "admin_edit_gpt_$id"]]
+        ]
+    ]));
+    exit;
+}
+
+
+if (strpos($data, 'deleteGPT|') === 0 && $from_id == $admin) {
+    delMessage();
+    list(, $id) = explode('|', $data);
+    $id = (int)$id;
+
+    $stmt = $connection->prepare("SELECT email FROM gpt_accounts WHERE id=? LIMIT 1");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$row) {
+        sendMessage("⚠️ مورد پیدا نشد یا قبلاً حذف شده است.");
+        exit;
+    }
+
+    $stmt = $connection->prepare("DELETE FROM gpt_accounts WHERE id=?");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $stmt->close();
+
+    sendMessage("✅ اکانت {$row['email']} با موفقیت حذف شد.",getMainKeys());
+    exit;
+}
+
+
+if ($data == 'choose_gpt') {
+   
+ 
+
+    $result = $connection->query("
+        SELECT * FROM gpt_accounts 
+        WHERE is_sold = 0 
+        ORDER BY id ASC 
+        LIMIT 1
+    ");
+
+    if ($result->num_rows == 0) {
+        sendMessage("⚠️ در حال حاضر اکانت GPT موجود نیست.");
+        exit;
+    }
+
+    $row = $result->fetch_assoc();
+    $id = $row['id'];
+    $price = number_format($row['price']);
+
+    $callback = "buyGPT|$id";
+
+    $keyboard = [
+        'inline_keyboard' => [
+            [
+                ['text' => "💰 قیمت: $price تومان", 'callback_data' => $callback]
+            ],
+            [
+                ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+            ]
+        ]
+    ];
+
+    sendMessage("👇 اکانت GPT موجود:", json_encode($keyboard));
+}
+
+if (strpos($data, 'buyGPT|') === 0) {
+
+    delMessage();
+    list(, $gptId) = explode('|', $data);
+
+    $stmt = $connection->prepare("SELECT * FROM gpt_accounts WHERE id=? AND is_sold=0 LIMIT 1");
+    $stmt->bind_param("i", $gptId);
+    $stmt->execute();
+    $acc = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$acc) {
+        sendMessage("⚠️ این اکانت دیگر موجود نیست!");
+        exit;
+    }
+
+    $price = (int)$acc['price'];
+    $hash_id = RandomString();
+    $time = time();
+    $user_id_int = (int)$from_id;
+
+
+    $stmt = $connection->prepare("
+        INSERT INTO pays (hash_id, user_id, type, plan_id, price, request_date, state)
+        VALUES (?, ?, 'BUY_GPT', ?, ?, ?, 'pending')
+    ");
+    $stmt->bind_param("siiii", $hash_id, $user_id_int, $gptId, $price, $time);
+    $stmt->execute();
+    $stmt->close();
+
+   
+    $keyboard = [];
+    if ($botState['zarinpal'] == "on") {
+        $keyboard[] = [['text' => $buttonValues['zarinpal_gateway'], 'url' => $botUrl . "pay/gpt.php?zarinpal=1&hash_id=$hash_id"]];
+    }
+    if ($botState['walletState'] == "on") {
+        $keyboard[] = [['text' => $buttonValues['pay_with_wallet'], 'callback_data' => "payWalletGPT$hash_id"]];
+    }
+    $keyboard[] = [['text' => $buttonValues['back_to_main'], 'callback_data' => "startMenu"]];
+
+    sendMessage(
+        "💰 مبلغ: " . number_format($price) . " تومان\n\nلطفاً روش پرداخت را انتخاب کنید:",
+        json_encode(['inline_keyboard' => $keyboard])
+    );
+}
+
+
+if (strpos($data, 'payWalletGPT') === 0) {
+
+    $hash_id = str_replace('payWalletGPT','',$data);
+    $user_id_int = (int)$from_id;
+
+  
+    $stmt = $connection->prepare("SELECT * FROM pays WHERE hash_id=? AND user_id=? LIMIT 1");
+    $stmt->bind_param("si", $hash_id, $user_id_int);
+    $stmt->execute();
+    $pay = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$pay) {
+        sendMessage("⚠️ پرداخت یافت نشد!");
+        exit;
+    }
+
+   
+    $stmt2 = $connection->prepare("SELECT * FROM gpt_accounts WHERE id=? AND is_sold=0 LIMIT 1");
+    $stmt2->bind_param("i", $pay['plan_id']);
+    $stmt2->execute();
+    $acc = $stmt2->get_result()->fetch_assoc();
+    $stmt2->close();
+
+    if (!$acc) {
+        sendMessage("⚠️ این اکانت قبلاً فروخته شده است!");
+        exit;
+    }
+
+   
+    $stmt3 = $connection->prepare("SELECT wallet FROM users WHERE userid=? LIMIT 1");
+    $stmt3->bind_param("i", $user_id_int);
+    $stmt3->execute();
+    $user = $stmt3->get_result()->fetch_assoc();
+    $stmt3->close();
+
+    if ($user['wallet'] < $pay['price']) {
+        sendMessage("⚠️ موجودی کافی نیست.");
+        exit;
+    }
+
+    
+    $newWallet = $user['wallet'] - $pay['price'];
+    $stmt = $connection->prepare("UPDATE users SET wallet=? WHERE userid=?");
+    $stmt->bind_param("ii", $newWallet, $user_id_int);
+    $stmt->execute();
+    $stmt->close();
+
+    
+    $stmt = $connection->prepare("UPDATE pays SET state='success' WHERE hash_id=?");
+    $stmt->bind_param("s", $hash_id);
+    $stmt->execute();
+    $stmt->close();
+
+    
+    $stmt = $connection->prepare("
+        UPDATE gpt_accounts 
+        SET is_sold=1, user_id=?, sold_time=? 
+        WHERE id=?
+    ");
+    $stmt->bind_param("iii", $user_id_int, time(), $acc['id']);
+    $stmt->execute();
+    $stmt->close();
+
+  
+    $keyboard = [
+        'inline_keyboard' => [
+            [
+                ['text' => $acc['email'], 'callback_data' => 'noop'],
+                ['text' => "📧 ایمیل", 'callback_data' => "noop"]
+            ],
+            [
+                ['text' => $acc['password'], 'callback_data' => 'noop'],
+                ['text' => "🔑 پسورد", 'callback_data' => "noop"]
+            ],
+          
+            [
+                ['text' => "📄 دریافت همه اطلاعات", 'callback_data' => "sendAllGPT_{$acc['id']}"]
+            ],
+            [
+                ['text' => $buttonValues['back_to_main'], 'callback_data' => "startMenu"]
+            ]
+        ]
+    ];
+
+    sendMessage("✅ خرید شما با موفقیت انجام شد.", json_encode($keyboard));
+
+  
+    $adminMsg = "💰 *خرید جدید GPT!*\n\n".
+                "👤 کاربر: $user_id_int\n".
+                "📧 ایمیل: {$acc['email']}\n".
+                "🔑 پسورد: {$acc['password']}\n".
+                "💵 مبلغ: ".number_format($pay['price'])." تومان\n".
+                "⏱ زمان: " . date("Y/m/d H:i:s");
+
+    sendMessage($adminMsg, null, "Markdown", $admin);
+}
+
+if (strpos($data, 'sendAllGPT_') === 0) {
+
+    $id = str_replace('sendAllGPT_', '', $data);
+
+    $stmt = $connection->prepare("
+        SELECT email, password, price FROM gpt_accounts WHERE id=? LIMIT 1
+    ");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $acc = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    $msg =
+        "📄 اطلاعات کامل اکانت GPT شما:\n\n".
+        "📧 ایمیل: {$acc['email']}\n".
+        "🔑 پسورد: {$acc['password']}";
+  
+
+    sendMessage($msg);
+}
+
+
+
+
+
+if ($data == 'choose_apple') {
+   
+  
+
+    $result = $connection->query("
+        SELECT * FROM apple_accounts 
+        WHERE is_sold = 0 
+        ORDER BY id ASC 
+        LIMIT 1
+    ");
+
+    if ($result->num_rows == 0) {
+        sendMessage("⚠️ متأسفانه در حال حاضر Apple ID موجود برای فروش نداریم.");
+        exit;
+    }
+
+    $row = $result->fetch_assoc();
+    $id = $row['id'];
+    $price = number_format($row['price']);
+    $country = $row['country'];
+
+    $callback = "buyApple|$id";
+
+    $keyboard = [
+        'inline_keyboard' => [
+            [ ['text' => "$country - $price تومان", 'callback_data' => $callback] ],
+            [ ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"] ]
+        ] 
+    ];
+
+    sendMessage("👇 Apple ID موجود برای فروش:", json_encode($keyboard));
+}
+
+
+
+if (strpos($data, 'buyApple|') === 0) {
+    delMessage();
+    list(, $appleId) = explode('|', $data);
+
+    $stmt = $connection->prepare("SELECT * FROM apple_accounts WHERE id=? AND is_sold=0 LIMIT 1");
+    $stmt->bind_param("i", $appleId);
+    $stmt->execute();
+    $apple = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$apple) {
+        sendMessage("⚠️ این Apple ID دیگر موجود نیست!");
+        exit;
+    }
+
+    $price = (int)$apple['price'];
+    if ($price <= 0) {
+        sendMessage("⚠️ قیمت این Apple ID معتبر نیست!");
+        exit;
+    }
+
+    $hash_id = RandomString();
+    $time = time();
+    $user_id_int = (int)($usersid ?? $from_id);
+
+    // ثبت خرید
+    $stmt = $connection->prepare("
+        INSERT INTO pays (hash_id, user_id, type, plan_id, volume, day, price, request_date, state)
+        VALUES (?, ?, 'BUY_APPLE', ?, 0, 0, ?, ?, 'pending')
+    ");
+    $stmt->bind_param("siiii", $hash_id, $user_id_int, $appleId, $price, $time);
+    $stmt->execute();
+    $stmt->close();
+
+    $keyboard = [];
+    if($botState['zarinpal'] == "on") $keyboard[] = [['text' => $buttonValues['zarinpal_gateway'], 'url' => $botUrl . "pay/apple.php?zarinpal=1&hash_id=$hash_id"]];
+    if ($botState['walletState'] == "on") {
+        $keyboard[] = [['text' => $buttonValues['pay_with_wallet'], 'callback_data' => "payWalletApple$hash_id"]];
+    }
+    $keyboard[] = [['text' => $buttonValues['back_to_main'], 'callback_data' => "startMenu"]];
+
+    sendMessage(
+        "💰 مبلغ: " . number_format($price) . " تومان\nکشور: {$apple['country']}\n\nلطفاً روش پرداخت را انتخاب کنید:",
+        json_encode(['inline_keyboard' => $keyboard])
+    );
+}
+
+
+if (strpos($data,'payWalletApple')===0) {
+    $hash_id = str_replace('payWalletApple','',$data);
+    $user_id_int = (int)($usersid ?? $from_id);
+
+  
+
+   
+    $stmt = $connection->prepare("SELECT * FROM `pays` WHERE `hash_id`=? AND `user_id`=? LIMIT 1");
+    $stmt->bind_param("si", $hash_id, $user_id_int);
+    $stmt->execute();
+    $pay = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+   
+
+    if(!$pay){
+        sendMessage("⚠️ پرداخت پیدا نشد یا نامعتبر است.");
+        exit;
+    }
+
+   
+    $stmtApple = $connection->prepare("SELECT * FROM apple_accounts WHERE id=? AND is_sold=0 LIMIT 1");
+    $stmtApple->bind_param("i", $pay['plan_id']);
+    $stmtApple->execute();
+    $apple = $stmtApple->get_result()->fetch_assoc();
+    $stmtApple->close();
+
+    if(!$apple){
+        sendMessage("⚠️ این Apple ID دیگر موجود نیست!");
+        exit;
+    }
+
+   
+    $stmtUser = $connection->prepare("SELECT wallet, username FROM users WHERE userid=? LIMIT 1");
+    $stmtUser->bind_param("i", $user_id_int);
+    $stmtUser->execute();
+    $userRow = $stmtUser->get_result()->fetch_assoc();
+    $stmtUser->close();
+
+    if(!$userRow){
+        sendMessage("⚠️ کاربر پیدا نشد!");
+        exit;
+    }
+
+    $userWallet = (int)$userRow['wallet'];
+    $username = $userRow['username'] ?? 'نامشخص';
+    $payPrice = (int)$pay['price'];
+    logEvent("User Wallet: $userWallet | Payment Price: $payPrice");
+
+    if($userWallet < $payPrice){
+        sendMessage("⚠️ موجودی کیف پول شما کافی نیست!");
+        exit;
+    }
+
+   
+    $newWallet = $userWallet - $payPrice;
+    $stmtUpdateWallet = $connection->prepare("UPDATE users SET wallet=? WHERE userid=?");
+    $stmtUpdateWallet->bind_param("ii", $newWallet, $user_id_int);
+    $stmtUpdateWallet->execute();
+    $stmtUpdateWallet->close();
+    logEvent("Wallet updated. New balance: $newWallet");
+
+   
+    $stmtUpdatePay = $connection->prepare("UPDATE pays SET state='success' WHERE hash_id=?");
+    $stmtUpdatePay->bind_param("s", $hash_id);
+    $stmtUpdatePay->execute();
+    $stmtUpdatePay->close();
+   
+
+   
+$stmtMarkSold = $connection->prepare("
+    UPDATE apple_accounts 
+    SET is_sold = 1, sold_to = ?, sold_time = ?, user_id = ? 
+    WHERE id = ?
+");
+$stmtMarkSold->bind_param("iiii", $user_id_int, time(), $user_id_int, $apple['id']);
+$stmtMarkSold->execute();
+$stmtMarkSold->close();
+
+ $keyboard = [
+    'inline_keyboard' => [
+        [
+            ['text' => $apple['email'], 'callback_data' => "noop"],
+            ['text' => "📧 ایمیل", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => $apple['password'], 'callback_data' => "noop"],
+            ['text' => "🔑 پسورد", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => $apple['country'], 'callback_data' => "noop"],
+            ['text' => "🌍 کشور", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => $apple['security_questions'], 'callback_data' => "noop"],
+            ['text' => "❓ سوالات امنیتی", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => $apple['recovery_info'], 'callback_data' => "noop"],
+            ['text' => "♻️ اطلاعات ریکاوری", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => number_format($payPrice)." تومان", 'callback_data' => "noop"],
+            ['text' => "💰 مبلغ پرداختی", 'callback_data' => "noop"]
+        ],
+        [
+            ['text' => "📄 دریافت کل اطلاعات", 'callback_data' => "send_all_{$apple['id']}"]
+        ],
+        
+        [
+            ['text'=>$buttonValues['cancel'],'callback_data'=>"mainMenu"]
+        ]
+    ]
+];
+
+sendMessage("✅ خرید شما با موفقیت انجام شد!", json_encode($keyboard));
+
+
+
+
+  
+ $adminMsg = "💰 خرید جدید:\n".
+            "🆔 کاربر: $user_id_int\n".
+            "📲 یوزرنیم: @{$username}\n".
+            "📧 Apple ID: {$apple['email']}\n".
+            "🔑 Password: {$apple['password']}\n".
+            "🌍 کشور: {$apple['country']}\n".
+            "❓ سوالات امنیتی:\n{$apple['security_questions']}\n".
+            "♻️ ریکاوری:\n{$apple['recovery_info']}\n".
+            "💰 مبلغ: ".number_format($payPrice)." تومان";
+
+sendMessage($adminMsg, null, "HTML", $admin);
+logEvent("Admin notified: $adminMsg");
+
+
+ 
+}
+if (strpos($data, 'send_all_') === 0) {
+    $id = str_replace('send_all_', '', $data);
+ delMessage();
+    $stmt = $connection->prepare("
+        SELECT email, password, country, price, security_questions, recovery_info
+        FROM apple_accounts 
+        WHERE id=? LIMIT 1
+    ");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    $msg = "📄 کل اطلاعات Apple ID خریداری‌شده:\n\n".
+           "📧 ایمیل: {$row['email']}\n".
+           "🔑 پسورد: {$row['password']}\n".
+           "🌍 کشور: {$row['country']}\n".
+           "❓ سوالات امنیتی:\n{$row['security_questions']}\n".
+           "♻️ اطلاعات ریکاوری:\n{$row['recovery_info']}\n".
+           "💰 مبلغ پرداختی: ".number_format($row['price'])." تومان";
+
+  $keyboard = [
+        'inline_keyboard' => [
+            [
+                ['text'=>$buttonValues['cancel'],'callback_data'=>"startMenu"]
+            ]
+        ] 
+    ];
+
+    sendMessage($msg, json_encode($keyboard));
+    exit;
+}
+if(strpos($data, 'deleteApple_') === 0){
+    $appleId = str_replace('deleteApple_','',$data);
+
+  
+    $stmt = $connection->prepare("SELECT email, password, country, security_questions, recovery_info FROM apple_accounts WHERE id=? AND user_id=? LIMIT 1");
+    $stmt->bind_param("ii",$appleId,$from_id);
+    $stmt->execute();
+    $apple = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if(!$apple){
+        sendMessage("⚠️ این Apple ID پیدا نشد یا متعلق به شما نیست.");
+        exit;
+    }
+
+   
+    $stmt = $connection->prepare("DELETE FROM apple_accounts WHERE id=? AND user_id=?");
+    $stmt->bind_param("ii",$appleId,$from_id);
+    $stmt->execute();
+    $stmt->close();
+
+    sendMessage("✅ Apple ID {$apple['email']} با موفقیت حذف شد.",getMainKeys());
+
+   
+    $adminMsg = "❌ Apple ID حذف شد:\n".
+                "🆔 کاربر: $from_id\n".
+                "📧 Apple ID: {$apple['email']}\n".
+                "🔑 Password: {$apple['password']}\n".
+                "🌍 کشور: {$apple['country']}\n".
+                "❓ سوالات امنیتی:\n{$apple['security_questions']}\n".
+                "♻️ اطلاعات ریکاوری:\n{$apple['recovery_info']}";
+    sendMessage($adminMsg, null, "HTML", $admin);
+}
+
+
+
+if ($data == "admin_add_apple" && $from_id == $admin) {
+
+    $connection->query("UPDATE users SET step='add_apple_email' WHERE userid='$from_id'");
+
+    $keyboard = [
+        'inline_keyboard' => [
+            [['text' => $buttonValues['cancel'], 'callback_data' => 'startMenu']]
+        ]
+    ];
+
+    sendMessage("📩 لطفاً ایمیل Apple ID را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+if ($user['step'] == "add_apple_email" && $from_id == $admin && !empty($text)) {
+
+    $email = trim($text);
+
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+         $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+        sendMessage("⚠️ ایمیل نامعتبر است. دوباره ارسال کنید:", json_encode($keyboard));
+        exit;
+    }
+
+    $connection->query("UPDATE users SET temp='$email', step='add_apple_password' WHERE userid='$from_id'");
+ $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+    sendMessage("🔑 لطفاً پسورد Apple ID را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+if ($user['step'] == "add_apple_password" && $from_id == $admin && !empty($text)) {
+
+    $password = trim($text);
+
+    
+    if (strlen($password) < 4 || strlen($password) > 50) {
+         $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+        sendMessage("⚠️ پسورد وارد شده نامعتبر است! حداقل 4 و حداکثر 50 کاراکتر مجاز است. لطفاً دوباره ارسال کنید.", json_encode($keyboard));
+        exit;
+    }
+
+   
+    if (!preg_match('/^[\w!@#$%^&*()\-_=+{}[\]|;:",.<>?]+$/', $password)) {
+         $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+        sendMessage("⚠️ پسورد شامل کاراکترهای غیرمجاز است. فقط حروف، اعداد و سمبل‌های استاندارد مجاز هستند.", json_encode($keyboard));
+        exit;
+    }
+
+   
+    $stmt = $connection->prepare("
+        UPDATE users 
+        SET temp=CONCAT(temp,'|||',?), step='add_apple_country' 
+        WHERE userid=?
+    ");
+    $stmt->bind_param("si", $password, $from_id);
+    $stmt->execute();
+    $stmt->close();
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("🌍 لطفاً کشور Apple ID را ارسال کنید (مثلاً US):", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+if ($user['step'] == "add_apple_country" && $from_id == $admin && !empty($text)) {
+
+    $country = trim($text);
+
+  
+    if (!preg_match('/^[a-zA-Z]{1,20}$/', $country)) {
+        $keyboard['inline_keyboard'][] = [
+            ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+        ];
+        sendMessage("⚠️ کشور باید فقط با حروف انگلیسی وارد شود. لطفاً دوباره ارسال کنید (مثلاً US، Iran).", json_encode($keyboard));
+        exit;
+    }
+
+    
+    $country = strtoupper($country); // یا اگر میخوای همونطور که وارد کرده ذخیره بشه، این خط رو حذف کن
+    $stmt = $connection->prepare("
+        UPDATE users 
+        SET temp=CONCAT(temp,'|||',?), step='add_apple_price' 
+        WHERE userid=?
+    ");
+    $stmt->bind_param("si", $country, $from_id);
+    $stmt->execute();
+    $stmt->close();
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("💰 لطفاً قیمت Apple ID را به تومان ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+if ($user['step'] == "add_apple_price" && $from_id == $admin && !empty($text)) {
+
+    
+    $price = (int)trim($text);
+
+    if ($price <= 0) {
+        $keyboard['inline_keyboard'][] = [
+            ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+        ];
+        sendMessage("⚠️ قیمت نامعتبر است. لطفاً دوباره ارسال کنید:", json_encode($keyboard));
+        exit;
+    }
+
+   
+    $stmt = $connection->prepare("
+        UPDATE users 
+        SET temp=CONCAT(temp,'|||',?), step='add_apple_security' 
+        WHERE userid=?
+    ");
+    $stmt->bind_param("ii", $price, $from_id);
+    $stmt->execute();
+    $stmt->close();
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("❓ لطفاً سوالات امنیتی Apple ID را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+
+if ($user['step'] == "add_apple_security" && $from_id == $admin && !empty($text)) {
+
+    $questions = trim($text);
+
+   
+    if (strlen($questions) < 3 || strlen($questions) > 500) {
+        $keyboard['inline_keyboard'][] = [
+            ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+        ];
+        sendMessage("⚠️ سوالات امنیتی نامعتبر است. لطفاً حداقل 3 و حداکثر 500 کاراکتر وارد کنید.", json_encode($keyboard));
+        exit;
+    }
+
+ 
+    $stmt = $connection->prepare("
+        UPDATE users 
+        SET temp=CONCAT(temp,'|||',?), step='add_apple_recovery'
+        WHERE userid=?
+    ");
+    $stmt->bind_param("si", $questions, $from_id);
+    $stmt->execute();
+    $stmt->close();
+
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("♻️ لطفاً اطلاعات ریکاوری را ارسال کنید:", json_encode($keyboard));
+    exit;
+}
+
+
+
+
+
+if ($user['step'] == "add_apple_recovery" && $from_id == $admin && !empty($text)) {
+
+    $recovery = trim($text);
+
+  
+    if (strlen($recovery) < 3 || strlen($recovery) > 500) {
+        $keyboard['inline_keyboard'][] = [
+            ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+        ];
+        sendMessage("⚠️ اطلاعات ریکاوری نامعتبر است. لطفاً حداقل 3 و حداکثر 500 کاراکتر وارد کنید.", json_encode($keyboard));
+        exit;
+    }
+
+    $parts = explode("|||", $user['temp']);
+
+    if (count($parts) < 5) {
+        sendMessage("⚠️ خطا: اطلاعات ثبت ناقص است. لطفاً مراحل را دوباره انجام دهید.");
+        exit;
+    }
+
+    list($email, $password, $country, $price, $questions) = $parts;
+
+    $stmt = $connection->prepare("
+        INSERT INTO apple_accounts 
+        (email, password, country, price, is_sold, security_questions, recovery_info)
+        VALUES (?, ?, ?, ?, 0, ?, ?)
+    ");
+    $stmt->bind_param("sssiss", $email, $password, $country, $price, $questions, $recovery);
+    $stmt->execute();
+    $stmt->close();
+
+    $connection->query("UPDATE users SET step='none', temp='' WHERE userid='$from_id'");
+
+    sendMessage(
+        "✅ Apple ID با موفقیت ثبت شد!\n\n".
+        "📧 ایمیل: $email\n".
+        "🔑 پسورد: $password\n".
+        "🌍 کشور: $country\n".
+        "❓ سوالات امنیتی:\n$questions\n".
+        "♻️ اطلاعات ریکاوری:\n$recovery\n".
+        "💰 قیمت: ".number_format($price)." تومان"
+    );
+
+    exit;
+} 
+
+
+
+
+if ($data == "admin_manage_apple" && $from_id == $admin) {
+    $result = $connection->query("SELECT * FROM apple_accounts");
+    $keyboard = ['inline_keyboard' => []];
+delMessage();
+    if ($result->num_rows == 0) {
+        sendMessage("⚠️ هیچ Apple ID ای موجود نیست.");
+        exit;
+    }
+
+    while ($row = $result->fetch_assoc()) {
+        $id = $row['id'];
+        $email = $row['email'];
+        $country = $row['country'];
+
+     
+        $keyboard['inline_keyboard'][] = [
+            ['text' => "❌ حذف", 'callback_data' => "deleteApple|$id"],
+            ['text' => "$email ($country)", 'callback_data' => "none"], // دکمه غیرقابل کلیک
+            ['text' => "✏️ ویرایش", 'callback_data' => "admin_edit_apple_$id"]
+        ];
+    }
+
+   
+    $keyboard['inline_keyboard'][] = [
+        ['text' => $buttonValues['cancel'], 'callback_data' => "startMenu"]
+    ];
+
+    sendMessage("📋 لیست Apple ID ها:", json_encode($keyboard));
+}
+
+
+if (strpos($data, "admin_edit_apple_") === 0) {
+delMessage();
+    $id = str_replace("admin_edit_apple_", "", $data);
+
+    $stmt = $connection->prepare("SELECT * FROM apple_accounts WHERE id=? LIMIT 1");
+    $stmt->bind_param("i", $id);
+    $stmt->execute();
+    $apple = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$apple) {
+        sendMessage("⚠️ Apple ID پیدا نشد!");
+        exit;
+    }
+
+    $keyboard = [
+        "inline_keyboard" => [
+            [
+                ["text" => "📧 {$apple['email']}", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|email|$id"]
+            ],
+            [
+                ["text" => "🔑 {$apple['password']}", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|password|$id"]
+            ],
+            [
+                ["text" => "🌍 {$apple['country']}", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|country|$id"]
+            ],
+            [
+                ["text" => "💰 {$apple['price']} تومان", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|price|$id"]
+            ],
+            [
+                ["text" => "❓ سوالات امنیتی", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|questions|$id"]
+            ],
+            [
+                ["text" => "♻️ ریکاوری", "callback_data" => "noop"],
+                ["text" => "✏️ ویرایش", "callback_data" => "edit_field|recovery|$id"]
+            ],
+            [
+                ["text" => "🔙 بازگشت", "callback_data" => "admin_manage_apple"]
+            ]
+        ]
+    ];
+
+    sendMessage("✏️ کدام بخش را می‌خواهید ویرایش کنید؟", json_encode($keyboard));
+}
+
+if (strpos($data, "edit_field|") === 0) {
+delMessage();
+    list(, $field, $id) = explode("|", $data);
+
+   
+    $connection->query("
+        UPDATE users 
+        SET step='edit_field_$field', temp='$id'
+        WHERE userid='$from_id'
+    ");
+
+    sendMessage("✏️ مقدار جدید برای «$field» را ارسال کنید:");
+    exit;
+}
+
+if (strpos($user['step'], "edit_field_") === 0 && $from_id == $admin) {
+delMessage();
+    $field = str_replace("edit_field_", "", $user['step']);
+    $id = (int)$user['temp'];
+    $newValue = trim($text);
+
+   
+    $dbFields = [
+        "email" => "email",
+        "password" => "password",
+        "country" => "country",
+        "price" => "price",
+        "questions" => "security_questions",
+        "recovery" => "recovery_info"
+    ];
+
+    if (!isset($dbFields[$field])) {
+        sendMessage("خطا: فیلد نامعتبر!");
+        exit;
+    }
+
+ 
+    $column = $dbFields[$field];
+
+    $stmt = $connection->prepare("UPDATE apple_accounts SET $column=? WHERE id=?");
+    $stmt->bind_param("si", $newValue, $id);
+    $stmt->execute();
+    $stmt->close();
+
+  
+    $connection->query("UPDATE users SET step='none', temp='' WHERE userid='$from_id'");
+
+    sendMessage("✅ با موفقیت ویرایش شد!");
+
+   
+    sendMessage("🔄 بازگشت به صفحه ویرایش...", json_encode([
+        "inline_keyboard" => [
+            [
+                ["text" => "بازگشت", "callback_data" => "admin_edit_apple_$id"]
+            ]
+        ]
+    ]));
+
+    exit;
+}
+
+if (strpos($data, 'deleteApple|') === 0 && $from_id == $admin) { 
+    list(, $appleId) = explode('|', $data);
+delMessage();
+    $stmt = $connection->prepare("SELECT email FROM apple_accounts WHERE id=? LIMIT 1");
+    $stmt->bind_param("i", $appleId);
+    $stmt->execute();
+    $apple = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if (!$apple) {
+        sendMessage("⚠️ این Apple ID پیدا نشد یا قبلاً حذف شده است.");
+        exit;
+    }
+
+  
+    $stmt = $connection->prepare("DELETE FROM apple_accounts WHERE id=?");
+    $stmt->bind_param("i", $appleId);
+    $stmt->execute();
+    $stmt->close();
+
+    sendMessage("✅ Apple ID {$apple['email']} با موفقیت حذف شد.",getMainKeys());
+}
+
+
+
+
 if($userInfo['phone'] == null && $from_id != $admin && $userInfo['isAdmin'] != true && $botState['requirePhone'] == "on"){
     if(isset($update->message->contact)){
         $contact = $update->message->contact;
