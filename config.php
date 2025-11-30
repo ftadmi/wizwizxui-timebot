@@ -57,6 +57,20 @@ function editText($msgId, $txt, $key = null, $parse = null, $ci = null){
         'reply_markup' =>  $key
         ]);
 }
+function delPrevMessages($count = 2, $chat_id = null){
+    global $from_id, $message_id;
+    
+    $chat_id = $chat_id ?? $from_id;
+    
+   
+    for($i = 1; $i <= $count; $i++){
+        $msg_id = $message_id - $i; 
+        bot('deleteMessage', [
+            'chat_id' => $chat_id,
+            'message_id' => $msg_id
+        ]);
+    }
+}
 function delMessage($msg = null, $chat_id = null){
     global $from_id, $message_id;
     $msg = $msg??$message_id;
@@ -266,6 +280,9 @@ function getMainKeys(){
             ($botState['testAccount'] == "on")?[['text'=>$buttonValues['test_account'],'callback_data'=>"getTestAccount"]]:
                 []
             ),
+		['text'=>$buttonValues['apple'],'callback_data'=>"choose_apple"],
+		['text' => $buttonValues['chatgpt'], 'callback_data' => 'choose_gpt']
+							],
         [['text'=>$buttonValues['sharj'],'callback_data'=>"increaseMyWallet"]],
         [['text'=>$buttonValues['invite_friends'],'callback_data'=>"inviteFriends"],['text'=>$buttonValues['my_info'],'callback_data'=>"myInfo"]],
         (($botState['sharedExistence'] == "on" && $botState['individualExistence'] == "on")?
