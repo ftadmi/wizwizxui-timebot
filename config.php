@@ -280,6 +280,7 @@ function getMainKeys(){
             ($botState['testAccount'] == "on")?[['text'=>$buttonValues['test_account'],'callback_data'=>"getTestAccount"]]:
                 []
             ),
+		[
 		['text'=>$buttonValues['apple'],'callback_data'=>"choose_apple"],
 		['text' => $buttonValues['chatgpt'], 'callback_data' => 'choose_gpt']
 							],
@@ -357,6 +358,15 @@ function getAdminKeys(){
             ['text'=>$buttonValues['agent_list'],'callback_data'=>"agentsList"],
             ['text'=>'درخواست های رد شده','callback_data'=>"rejectedAgentList"]
             ],
+					       [ ['text' => $buttonValues['apple_add'], 'callback_data' => 'admin_add_apple']],
+                   [ ['text' => $buttonValues['apple_manage'], 'callback_data' => 'admin_manage_apple']],
+					   [
+    ['text' => $buttonValues['chatgpt_add'], 'callback_data' => 'admin_add_gpt']
+],
+[
+    ['text' => $buttonValues['chatgpt_manage'], 'callback_data' => 'admin_manage_gpt']
+],
+
         [['text'=>$buttonValues['back_to_main'],'callback_data'=>"mainMenu"]],
     ]]);
     
